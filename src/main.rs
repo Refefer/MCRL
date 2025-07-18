@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-
 use clap::{Parser};
 use comfy_table::{Table, Cell};
 use comfy_table::presets::UTF8_FULL_CONDENSED;
@@ -11,6 +10,7 @@ use float_ord::FloatOrd;
 use itertools::Itertools;
 use rand::prelude::*;
 use rand_xorshift::XorShiftRng;
+use rand_distr::Dirichlet;
 use rayon::prelude::*;
 use serde_json::Value;
 
@@ -73,6 +73,11 @@ struct Args {
     #[arg(long = "comparison-test")]
     comparison_test: Option<usize>,
 
+    /// Alpha parameter to use for bayesian probability.  Alpha = 1 is uniform prior
+    /// Alpha < 1 is optimistic.  Alpha > 1 is more empirical
+    #[arg(long = "alpha")]
+    alpha: Option<f64>,
+
     /// Comma-separated list of fields to group on for comparison
     #[arg(long = "comparison-group-fields")]
     comparison_group_fields: Option<String>,
@@ -113,6 +118,30 @@ fn permutation_test(
     (obs, p_val)
 }
 
+fn bootstrap_p_e_a_b(
+    a_data: &[f64],
+    b_data: &[f64],
+    rng: &mut impl Rng,
+    samples: usize,
+) -> f64 {
+    let seed = rng.gen::<u64>();
+    let count = (0..samples).into_par_iter().map(|idx| {
+        let mut prng = XorShiftRng::seed_from_u64(seed + idx as u64);
+
+        let a_sample_mean: f64 = (0..a_data.len())
+            .map(|_| *a_data.choose(&mut prng).unwrap())
+            .sum::<f64>() / a_data.len() as f64;
+
+        let b_sample_mean: f64 = (0..b_data.len())
+            .map(|_| *b_data.choose(&mut prng).unwrap())
+            .sum::<f64>() / b_data.len() as f64;
+
+        if a_sample_mean > b_sample_mean { 1 } else { 0 }
+    }).sum::<usize>();
+
+    count as f64 / samples as f64
+}
+
 fn bootstrap_p_a_b(
     a_data: &[f64],
     b_data: &[f64],
@@ -131,8 +160,10 @@ fn bootstrap_p_a_b(
             if a > b { 1 } else { 0 }
         }
     }).sum::<usize>();
+    
     count as f64 / samples as f64
 }
+
 
 #[derive(Copy,Clone,Debug)]
 enum Stat {
@@ -175,6 +206,60 @@ fn bootstrap_ci(
     let lo_idx = ((alpha / 2.0) * (samples as f64)).floor() as usize;
     let hi_idx = ((1.0 - alpha / 2.0) * (samples as f64)).ceil().min((samples - 1) as f64) as usize;
     (stats[lo_idx], stats[hi_idx])
+}
+
+fn bayesian_bootstrap(
+    a_data: &[f64],
+    alpha: f64,
+    n_bootstrap: usize,
+    rng: &mut impl Rng,
+) -> Vec<f64> {
+    // Arrays need to be constant valued.
+    const subsample_size: usize = 1_000;
+
+    let n = a_data.len();
+    let alpha = [alpha; subsample_size];
+    let dist = Dirichlet::new(alpha).expect("Error with alpha selected for Dirichlet distribution!");
+    let mut results = vec![0f64; n_bootstrap];
+
+    let seed = rng.random::<u64>();
+
+    // Check if we have enough data to do a better montecarlo approximation of Ruben's. 
+    // If we have fewer data points than we used bagged and smoothed which is less accurate.
+    let replacement = n < subsample_size;
+    results.par_iter_mut().enumerate().for_each(|(i, vi)| {
+        let mut prng = XorShiftRng::seed_from_u64(seed + i as u64);
+        let mut sample = [1.0; subsample_size];
+        if replacement {
+            sample.iter_mut().for_each(|si| {
+                *si = *a_data.choose(&mut prng).unwrap();
+            });
+        } else {
+            for (b, si) in a_data.choose_multiple(&mut prng, sample.len()).zip(sample.iter_mut()) {
+                *si = *b;
+            }
+        }
+        let weights = dist.sample(&mut prng);
+        *vi = weights.into_iter().zip(sample.into_iter()).map(|(w, s)| w * s).sum::<f64>();
+    });
+
+    results
+
+}
+
+fn bayesian_bootstrap_p_a_b(
+    a_data: &[f64],
+    b_data: &[f64],
+    alpha: f64,
+    n_bootstrap: usize,
+    rng: &mut impl Rng
+) -> f64 {
+    let a_boot = bayesian_bootstrap(a_data, alpha, n_bootstrap, rng);
+    let b_boot = bayesian_bootstrap(b_data, alpha, n_bootstrap, rng);
+    let successes = a_boot.into_iter().zip(b_boot.into_iter()).map(|(ai, bi)| {
+        if (ai - bi) > 0f64 {1f64} else {0f64}
+    }).sum::<f64>();
+    successes / n_bootstrap as f64
 }
 
 fn compute_returns(
@@ -237,6 +322,8 @@ fn format_row(
     obs: f64,
     p_val: f64,
     p_b_gt_a: f64,
+    p_e_b_gt_a: f64,
+    bp_b_gt_a: f64,
     digits: usize,
     ci_cut: f64,
 ) -> Vec<Cell> {
@@ -249,6 +336,8 @@ fn format_row(
         Cell::new(format!("{:.1$}", obs, digits)),
         Cell::new(format!("{:.1$}{2}", p_val, digits, suffix)),
         Cell::new(format!("{:.1$}", p_b_gt_a, digits)),
+        Cell::new(format!("{:.1$}", p_e_b_gt_a, digits)),
+        Cell::new(format!("{:.1$}", bp_b_gt_a, digits)),
     ]
 }
 
@@ -262,6 +351,7 @@ fn comparison_tests(
     digits: usize,
     min_obs: usize,
     prob_gte: bool,
+    alpha: f64
 ) {
     // Group states
     let mut groups: HashMap<_, Vec<_>> = HashMap::new();
@@ -280,8 +370,15 @@ fn comparison_tests(
     let mut table = Table::new();
     table.load_preset(UTF8_FULL_CONDENSED).apply_modifier(UTF8_ROUND_CORNERS);
 
-    let mut hdr = vec!["A","B","|A|","|B|","E[B] - E[A]","P-Value"];
-    hdr.push(if prob_gte { "P(B >= A)" } else { "P(B > A)"});
+    let mut hdr = vec!["A", "B", "|A|", "|B|", "E[B] - E[A]", "P-Value"];
+    if prob_gte {
+        hdr.push("P(B >= A)");
+    } else {
+        hdr.push("P(B > A)");
+    }
+    hdr.push("P(E[B] > E[A])");
+    let bayes_col = format!("Bayes P(B > A, alpha={})", alpha);
+    hdr.push(&bayes_col);
 
     table.set_header(hdr.iter().map(|h| Cell::new(*h)).collect::<Vec<_>>());
 
@@ -302,9 +399,11 @@ fn comparison_tests(
             let (a_state, a_data) = a;
             let (b_state, b_data) = b;
             let (obs, p_val) = permutation_test(b_data, a_data, &mut rng, func, permutations, true);
-            let p_b_gt_a = bootstrap_p_a_b(b_data, a_data, &mut rng, permutations, prob_gte);
+            let p_b_gt_a  = bootstrap_p_a_b(b_data, a_data, &mut rng, permutations, prob_gte);
+            let p_e_b_gt_a  = bootstrap_p_e_a_b(b_data, a_data, &mut rng, permutations);
+            let bp_b_gt_a = bayesian_bootstrap_p_a_b(b_data, a_data, alpha, permutations, &mut rng);
             format_row(a_state, b_state, a_data.len(), b_data.len(),
-                                 obs, p_val, p_b_gt_a, digits, ci_cut)
+                                 obs, p_val, p_b_gt_a, p_e_b_gt_a, bp_b_gt_a, digits, ci_cut)
         }).collect();
 
         let mut rows_all = Vec::with_capacity(tups.len() + 1);
@@ -394,6 +493,7 @@ fn main() {
             args.round,
             args.min_obs,
             args.probability_gte,
+            args.alpha.unwrap_or(1.0)
         );
     }
 }
