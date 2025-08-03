@@ -271,7 +271,6 @@ fn compute_returns(
     lb: Option<f64>,
 ) {
     let mut G = 0.0;
-    rets.clear();
     for o in orders.iter().rev() {
         let mut r = o[reward_field].as_f64().unwrap_or(0.0);
         if let Some(u) = ub { r = r.min(u) }
@@ -300,6 +299,7 @@ fn aggregate_states(args: &Args) -> HashMap<Vec<String>, Vec<f64>> {
     let mut rets = Vec::new();
     for line in reader.lines().map(Result::unwrap) {
         let orders: Vec<Value> = serde_json::from_str(&line).unwrap();
+        rets.clear();
         compute_returns(&orders, &mut rets, &args.reward_field,
                                    args.discount, args.ub_wind, args.lb_wind);
 
