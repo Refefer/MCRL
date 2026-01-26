@@ -91,3 +91,54 @@ mcrl-rs --dataset trajectories.json \
 ```
 
 This will output a main table of state values and a comparison table for all state pairs.
+
+## Examples
+
+The [`examples/`](examples/) folder contains three real-world inspired datasets with pre-generated data:
+
+| Example | Use Case | Key Features |
+|---------|----------|--------------|
+| [GridWorld](examples/gridworld/) | RL policy evaluation | Discounting, multi-field states, value gradients |
+| [A/B Test](examples/ab_test/) | Conversion optimization | Grouped comparisons, segmentation, Winsorization |
+| [Bandit](examples/bandit/) | Reward distribution analysis | Mean vs median estimators, variance comparison |
+
+### GridWorld Navigation
+
+Evaluate navigation policies in a 4x4 grid environment. Demonstrates how discount factors affect state values.
+
+```bash
+./target/release/mcrl-rs --dataset examples/gridworld/trajectories.jsonl \
+    --state-field x --state-field y \
+    --reward-field reward \
+    --discount 0.95
+```
+
+### A/B Testing
+
+Compare checkout variants across customer segments. Shows grouped comparisons with `--comparison-group-fields`.
+
+```bash
+./target/release/mcrl-rs --dataset examples/ab_test/sessions.jsonl \
+    --state-field segment --state-field variant \
+    --reward-field purchase-price \
+    --comparison-test 1000 \
+    --comparison-group-fields 0
+```
+
+### Multi-Armed Bandit
+
+Identify the best slot machine using mean vs median estimators. Demonstrates how estimator choice affects rankings when distributions have different variances.
+
+```bash
+# Mean estimator (favors high expected value)
+./target/release/mcrl-rs --dataset examples/bandit/pulls.jsonl \
+    --state-field machine --reward-field reward \
+    --comparison-test 1000 --estimator mean
+
+# Median estimator (favors consistent payouts)
+./target/release/mcrl-rs --dataset examples/bandit/pulls.jsonl \
+    --state-field machine --reward-field reward \
+    --comparison-test 1000 --estimator median
+```
+
+See [`examples/README.md`](examples/README.md) for detailed documentation and data generation scripts.
