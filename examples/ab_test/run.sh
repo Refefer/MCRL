@@ -7,9 +7,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 "$PROJECT_ROOT/target/release/mcrl-rs" \
     --dataset "$SCRIPT_DIR/sessions.jsonl" \
-    --state-field segment --state-field variant \
+    --state-field page \
+    --state-field segment \
+    --state-field variant \
     --reward-field purchase-price \
     --discount 1.0 \
     --comparison-test 5000 \
-    --comparison-group-fields 0 \
+    --comparison-group-fields 0,1 \
     --min-observations 50
